@@ -129,7 +129,12 @@ def create_gui_layout():
                 [sg.Column([
                     [sg.Button('Analyze', size=(10, 1)), sg.Button('Clear', size=(10, 1)), sg.Push(), sg.Text('Options:'), sg.Checkbox('Save I/O', key='-SAVE-'), sg.Checkbox('Export Report', key='-EXPORT-')]
                 ], element_justification='center', expand_x=True)]
-            ], key='-ANALYZE_TAB-')
+            ], key='-ANALYZE_TAB-'),
+                       sg.Tab('Hypothesis Builder', [
+                [sg.HorizontalSeparator()],
+                [sg.Text('Threat Report Path:'), sg.InputText(key='-THREAT_REPORT_FILE_PATH-', expand_x=True), sg.FileBrowse()],
+                [sg.HorizontalSeparator()]
+            ])  # New tab added here
         ]], expand_x=True, expand_y=True)],
         [sg.HorizontalSeparator()],
         [sg.Text('ThreatScout version 0.2'), sg.Push(), sg.Text('Progress:'), sg.ProgressBar(100, orientation='h', size=(15, 20), key='-PROGRESS-'), sg.VerticalSeparator(), sg.Text('Status:'), sg.Text('- Ready -', size=(25, 1), key='-STATUS-', justification='right')]
