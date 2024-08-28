@@ -13,7 +13,7 @@ import pypandoc
 from docx import Document
 import PyPDF2
 
-THREATSCOUT_VERSION = 'ThreatScout version 0.4'
+THREATSCOUT_VERSION = 'ThreatScout version 0.5'
 CONFIG_FILE = 'config.json'
 KEY_FILE = 'key.key'
 
@@ -49,11 +49,12 @@ def decrypt_api_key(encrypted_api_key):
 
 def save_config(api_key=None, theme=None, analyze_file_path=None, analyze_output=None,
                 hypothesis_file_path=None, hypothesis_output=None, pcap_file_path=None,
-                pcap_output=None, pcap_alerts_path=None):
+                pcap_output=None, pcap_alerts_path=None, rule_output=None, prompt_input=None):
     config = {}
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as config_file:
             config = json.load(config_file)
+
     if api_key:
         config['ENCRYPTED_OPENAI_API_KEY'] = encrypt_api_key(api_key)
     if theme:
@@ -72,6 +73,11 @@ def save_config(api_key=None, theme=None, analyze_file_path=None, analyze_output
         config['PCAP_OUTPUT'] = pcap_output
     if pcap_alerts_path is not None:
         config['PCAP_ALERTS_PATH'] = pcap_alerts_path
+    if rule_output is not None:
+        config['RULE_OUTPUT'] = rule_output
+    if prompt_input is not None:
+        config['PROMPT_INPUT'] = prompt_input
+
     with open(CONFIG_FILE, 'w') as config_file:
         json.dump(config, config_file)
 
@@ -79,8 +85,9 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as config_file:
             config = json.load(config_file)
+
         encrypted_api_key = config.get('ENCRYPTED_OPENAI_API_KEY')
-        theme = config.get('THEME', 'DarkGrey11')
+        theme = config.get('THEME', 'DarkGrey16')
         analyze_file_path = config.get('ANALYZE_FILE_PATH', '')
         analyze_output = config.get('ANALYZE_OUTPUT', '')
         hypothesis_file_path = config.get('HYPOTHESIS_FILE_PATH', '')
@@ -88,17 +95,25 @@ def load_config():
         pcap_file_path = config.get('PCAP_FILE_PATH', '')
         pcap_output = config.get('PCAP_OUTPUT', '')
         pcap_alerts_path = config.get('PCAP_ALERTS_PATH', '')
-        
+        rule_output = config.get('RULE_OUTPUT', '')
+        prompt_input = config.get('PROMPT_INPUT', '')
+
         if encrypted_api_key:
             return (decrypt_api_key(encrypted_api_key), theme, analyze_file_path, analyze_output,
-                    hypothesis_file_path, hypothesis_output, pcap_file_path, pcap_output, pcap_alerts_path)
-    return None, 'DarkGrey11', '', '', '', '', '', '', ''
+                    hypothesis_file_path, hypothesis_output, pcap_file_path, pcap_output,
+                    pcap_alerts_path, rule_output, prompt_input)
 
-def call_gpt(client, prompt):
-    messages = [
-        {'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'},
-        {'role': 'user', 'content': prompt}
+    return None, 'DarkGrey16', '', '', '', '', '', '', '', '', ''
+
+def call_gpt(client, prompt, history=None):
+    if not history:
+        messages = [
+            {'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'},
+            {'role': 'user', 'content': prompt}
     ]
+    else:
+        messages = prompt
+
     response = client.chat.completions.create(
         model='gpt-4o',
         messages=messages,
@@ -297,6 +312,35 @@ def analyze_pcap_file(window, pcap_path, alerts_path=None):
 
     return pcap_summary
 
+def create_detection_rule_builder_tab():
+    default_prompt_text = (
+        "How to Build and Refine Detection Rules:\n\n"
+        "1. Identify Unique Threats: Conduct assessments to identify specific threats.\n"
+        "2. Draft Rules with AI: Use specific threat characteristics in your prompts.\n"
+        "3. Test Rules: Deploy in a test environment and check for false positives.\n"
+        "4. Refinement: Come back here and use the test results to refine rules.\n"
+        "5. Deployment: Deploy refined rules into production systems.\n\n"
+        "Note: Once you exit or close this program, the AI conversation history is lost."
+    )
+    
+    return sg.Tab('Detection Rule Builder', [
+        [sg.HorizontalSeparator()],
+        [sg.Text('Prompt Input:')],
+        [sg.Multiline(default_text=default_prompt_text, size=(124, 10), key='-PROMPT_INPUT-', expand_x=True, expand_y=True, 
+                      font=('Helvetica', 12, 'italic'))],  # Multiline with default text and italic font
+        [sg.Text('Rule Options:')],
+        [sg.Checkbox('Sigma', key='-SIGMA-'), sg.Checkbox('Yara', key='-YARA-'), sg.Checkbox('Suricata', key='-SURICATA-'), sg.Checkbox('KQL', key='-KQL-')],
+        [sg.HorizontalSeparator()],
+        [sg.Frame('Rule Output', [
+            [sg.Multiline(size=(124, 10), key='-RULE_OUTPUT-', expand_x=True, expand_y=True)]
+        ], expand_x=True, expand_y=True)],
+        [sg.HorizontalSeparator()],
+        [sg.Column([
+            [sg.Button('Build', key='-BUILD_RULE-', size=(10, 1)), sg.Button('Clear', key='-CLEAR_RULE-', size=(10, 1)), sg.Push(), sg.Text('Options:'), 
+             sg.Checkbox('Save I/O', key='-SAVE_RULE-'), sg.Checkbox('Export Rule', key='-EXPORT_RULE-')]
+        ], element_justification='center', expand_x=True)],
+    ], key='-DETECTION_RULE_BUILDER_TAB-')
+
 def create_gui_layout():
     layout = [
         [sg.Image(filename=text_image_path, key='-THREATSCOUT-TXT-IMAGE-'), sg.Text('Threat Hunt Assist Tool'),
@@ -341,8 +385,9 @@ def create_gui_layout():
                 [sg.Column([
                     [sg.Button('Analyze', key='-ANALYZE_PCAP-', size=(10, 1)), sg.Button('Clear', key='-CLEAR_PCAP_RESULTS-', size=(10, 1)), sg.Push(), sg.Text('Options:'), sg.Checkbox('Save I/O', key='-SAVE_PCAP_RESULTS-'), sg.Checkbox('Export Report', key='-EXPORT_PCAP_RESULTS-')]
                 ], element_justification='center', expand_x=True)],
-            ], key='-PCAP_TAB-')
-        ]], expand_x=True, expand_y=True)],
+            ], key='-PCAP_TAB-')],
+             [create_detection_rule_builder_tab()]  # Add the new tab
+            ], expand_x=True, expand_y=True)],
         [sg.HorizontalSeparator()],
         [sg.Text(THREATSCOUT_VERSION + ' :: ' + 'Powered by AI'), sg.Push(), sg.Text('Progress:'), sg.ProgressBar(100, orientation='h', size=(15, 20), key='-PROGRESS-'), sg.VerticalSeparator(), sg.Text('Status:'), sg.Text('- Ready -', size=(25, 1), key='-STATUS-', justification='right')]
     ]
@@ -413,15 +458,65 @@ def build_threat_hypothesis(client, file_path, window):
     window['-PROGRESS-'].update_bar(100)
     window['-STATUS-'].update('Hypothesis built.')
 
+def build_rule(client, window, values, conversation_history):
+    # Retrieve user's prompt input
+    user_prompt = values['-PROMPT_INPUT-'].strip()
+    
+    # Check which rule options are selected
+    selected_rules = []
+    if values['-SIGMA-']:
+        selected_rules.append('Sigma')
+    if values['-YARA-']:
+        selected_rules.append('Yara')
+    if values['-SURICATA-']:
+        selected_rules.append('Suricata')
+    if values['-KQL-']:
+        selected_rules.append('KQL')
+    
+    # Ensure at least one rule is selected
+    if not selected_rules:
+        sg.popup('Error', 'At least one rule must be selected to build the rule.')
+        return
+    
+    # Update status and progress
+    window['-STATUS-'].update('Building rule...')
+    window['-PROGRESS-'].update_bar(0)
+    
+    # Create the static prompt with placeholders
+    rules = ', '.join(selected_rules)
+    static_prompt = f"Can you help me draft a {rules} rule to detect this specific activity?"
+    
+    # Combine the user's prompt with the static prompt
+    full_prompt = f"{user_prompt}\n\n{static_prompt}"
+    
+    # Add the user's input to the conversation history
+    conversation_history.append({'role': 'user', 'content': full_prompt})
+    
+    # Call the OpenAI API with the conversation history
+    try:
+        window['-PROGRESS-'].update_bar(50)
+        rule_output = call_gpt(client, conversation_history, history=True)
+        conversation_history.append({'role': 'assistant', 'content': rule_output})
+        window['-RULE_OUTPUT-'].update(rule_output)
+        window['-STATUS-'].update('Rule built successfully.')
+    except Exception as e:
+        sg.popup('An error occurred while generating the rule', str(e))
+        window['-STATUS-'].update('Error occurred.')
+    
+    # Update progress to complete
+    window['-PROGRESS-'].update_bar(100)
+
+    return conversation_history
+
 def main():
-    (api_key, theme, analyze_file_path, analyze_output,
-     hypothesis_file_path, hypothesis_output, pcap_file_path,
-     pcap_output, pcap_alerts_path) = load_config()
+    (api_key, theme, analyze_file_path, analyze_output, hypothesis_file_path, hypothesis_output,
+     pcap_file_path, pcap_output, pcap_alerts_path, rule_output, prompt_input) = load_config()
+    
 
     sg.theme(theme)
     sg.set_options(font=('Helvetica', 12))
     layout = create_gui_layout()
-    window = sg.Window('.:: ThreatScout ::.', layout, size=(805, 600), resizable=True, finalize=True)
+    window = sg.Window('.:: ThreatScout ::.', layout, size=(805, 625), resizable=True, finalize=True)
     client = openai.OpenAI(api_key=api_key) if api_key else None
 
     if analyze_file_path:
@@ -438,6 +533,13 @@ def main():
         window['-PCAP_RESULTS-'].update(pcap_output)
     if pcap_alerts_path:
         window['-ALERTS_FILE_PATH-'].update(pcap_alerts_path)
+    if rule_output:
+        window['-RULE_OUTPUT-'].update(rule_output)
+    if prompt_input:
+        window['-PROMPT_INPUT-'].update(prompt_input)
+
+    # Initialize conversation history
+    conversation_history = [{'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'}]
 
     while True:
         event, values = window.read()
@@ -613,6 +715,7 @@ def main():
                 # Save or export if options are selected
                 if values['-SAVE_PCAP_RESULTS-']:
                     save_config(pcap_file_path=pcap_path, pcap_output=pcap_analysis, pcap_alerts_path=alerts_path)
+
                 if values['-EXPORT_PCAP_RESULTS-']:
                     window['-STATUS-'].update('Generating Word document...')
                     window['-PROGRESS-'].update_bar(0)
@@ -640,6 +743,42 @@ def main():
             window['-PROGRESS-'].update_bar(0)  # Reset the progress bar
             window['-STATUS-'].update('- Ready -')  # Update status to Ready
             save_config(pcap_file_path='', pcap_output='', pcap_alerts_path='')
+
+        elif event == '-BUILD_RULE-':
+        # Handle building the detection rule using OpenAI API
+            conversation_history = build_rule(client, window, values, conversation_history)
+
+            # Handle Save I/O and Export Rule options
+            if values['-SAVE_RULE-']:
+                save_config(rule_output=window['-RULE_OUTPUT-'].get())
+
+            # Handle Save I/O and Export Rule options
+            if values['-SAVE_RULE-']:
+                save_config(rule_output=window['-RULE_OUTPUT-'].get(), prompt_input=window['-PROMPT_INPUT-'].get())
+
+            if values['-EXPORT_RULE-']:
+                window['-STATUS-'].update('Generating Word document...')
+                window['-PROGRESS-'].update_bar(0)
+                report_name = 'Detection_Rule.docx'
+                report_path = save_report(window['-RULE_OUTPUT-'].get(), report_name)
+                window['-PROGRESS-'].update_bar(100)
+                response = sg.popup('Report Generated!', f'Report saved at: {report_path}', custom_text=('Open', 'Close'), keep_on_top=True)
+                if response == 'Open':
+                    if os.name == 'nt':  # For Windows
+                        os.startfile(report_path)
+                    elif os.name == 'posix':  # For macOS and Linux
+                        if sys.platform == 'darwin':  # Specifically for macOS
+                            subprocess.call(('open', report_path))
+                        else:  # For Linux
+                            subprocess.call(('xdg-open', report_path))
+                window['-STATUS-'].update('Done')
+
+        elif event == '-CLEAR_RULE-':
+            window['-PROMPT_INPUT-'].update('')
+            window['-RULE_OUTPUT-'].update('')
+            window['-PROGRESS-'].update_bar(0)  # Reset the progress bar
+            window['-STATUS-'].update('- Ready -')  # Update status to Ready
+            save_config(prompt_input='', rule_output='')
 
         elif event == 'API Key':
             api_key_win = api_key_window(api_key)
@@ -680,7 +819,7 @@ def main():
                     sg.popup('Theme saved securely!')
                     window.close()
                     layout = create_gui_layout()
-                    window = sg.Window('.:: ThreatScout ::.', layout, size=(805, 600), resizable=True, finalize=True)
+                    window = sg.Window('.:: ThreatScout ::.', layout, size=(805, 625), resizable=True, finalize=True)
                     save_config(theme=theme)
                     client = openai.OpenAI(api_key=api_key) if api_key else None
                     break
