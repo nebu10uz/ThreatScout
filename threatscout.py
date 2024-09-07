@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import subprocess
@@ -12,6 +13,7 @@ from scapy.layers.dns import DNS, DNSQR
 import pypandoc
 from docx import Document
 import PyPDF2
+from interpreter import interpreter
 
 THREATSCOUT_VERSION = 'ThreatScout version 0.5'
 CONFIG_FILE = 'config.json'
@@ -20,7 +22,6 @@ KEY_FILE = 'key.key'
 # Path to ThreatScout logo images
 logo_image_path = 'Images/Docrop2.png'
 text_image_path = 'Images/big_ThreatScout.png'
-
 
 def generate_key():
     key = Fernet.generate_key()
@@ -170,18 +171,44 @@ def analyze_threat_data(client, file_path, window):
     window['-STATUS-'].update('Analysis complete.')
     return identified_threats, extracted_iocs, threat_context
 
-def markdown_to_docx(markdown_text: str, output_file: str):
+def markdown_to_docx(markdown_text: str, output_file: str) -> bool:
+    """Convert markdown text to a .docx file."""
     try:
         pypandoc.convert_text(markdown_text, 'docx', format='md', outputfile=output_file)
+        return True
     except RuntimeError as e:
         print(f"Error during conversion: {e}")
+        return False
 
 def save_report(output, report_name):
     if not os.path.exists('Reports'):
         os.makedirs('Reports')
+    
+    base_name, extension = os.path.splitext(report_name)
+    index = 1
     report_path = os.path.join('Reports', report_name)
-    markdown_to_docx(output, report_path)
-    return report_path
+    while os.path.exists(report_path):
+        report_name = f"{base_name}_{index}{extension}"
+        report_path = os.path.join('Reports', report_name)
+        index += 1
+    
+    if markdown_to_docx(output, report_path):
+        return report_path
+    else:
+        return None
+
+def save_to_file(content, base_name, extension):
+    """Save content to a file, ensuring the filename is unique."""
+    if not os.path.exists('Sessions'):
+        os.makedirs('Sessions')
+    index = 1
+    file_name = f"{base_name}{extension}"
+    while os.path.exists(os.path.join('Sessions', file_name)):
+        file_name = f"{base_name}_{index}{extension}"
+        index += 1
+    with open(os.path.join('Sessions', file_name), 'w') as file:
+        file.write(content)
+    return file_name
 
 def calculate_file_hash(file_data, hash_algorithm='sha256'):
     #--- Calculate the hash of file data using the specified algorithm. ---
@@ -312,6 +339,46 @@ def analyze_pcap_file(window, pcap_path, alerts_path=None):
 
     return pcap_summary
 
+def execute_command(window, command, ai_only=False):
+    try:
+        full_response = []
+        first_chunk = True
+        previous_type = None
+        password_prompt = False
+        
+        window['-PROGRESS-'].update_bar(50)
+        for chunk in interpreter.chat(command, stream=True, display=False):
+            if chunk["type"] in ["message", "console", "input"]:
+                if "content" in chunk and chunk["content"] is not None:
+                    content = str(chunk["content"])
+                    
+                    # Filter out console responses if the checkbox is checked
+                    if ai_only and chunk["type"] != "message":
+                        continue
+                    
+                    if first_chunk:
+                        content = content.lstrip('1').lstrip()
+                        first_chunk = False
+                    
+                    # Add a newline if the type changes
+                    if previous_type and previous_type != chunk["type"]:
+                        full_response.append('\n\n')
+                    
+                    full_response.append(content)
+                    previous_type = chunk["type"]
+                    
+                    # Check for password prompt
+                    if any(keyword in content.lower() for keyword in ["Password:", "sudo", "authentication"]):
+                        password_prompt = True
+                        break  # Exit the loop if a password prompt is detected
+        
+        if password_prompt:
+            return "Password prompt detected. Unable to proceed automatically."
+        else:
+            return ''.join(full_response).strip()
+    except Exception as e:
+        return f"Error executing command: {str(e)}"
+    
 def create_detection_rule_builder_tab():
     default_prompt_text = (
         "How to Build and Refine Detection Rules:\n\n"
@@ -340,6 +407,29 @@ def create_detection_rule_builder_tab():
              sg.Checkbox('Save I/O', key='-SAVE_RULE-'), sg.Checkbox('Export Rule', key='-EXPORT_RULE-')]
         ], element_justification='center', expand_x=True)],
     ], key='-DETECTION_RULE_BUILDER_TAB-')
+
+def create_threat_hunt_local_shell_tab():
+    return sg.Tab('Local Shell', [
+        [sg.HorizontalSeparator()],
+        [sg.Text('Threat Hunt Prompt:')],
+        [sg.Input(size=(124, 0), key='-SHELL_PROMPT_INPUT-', expand_x=True, disabled=True,  font=('Helvetica', 12, 'italic'))],  # Initially disabled
+        [sg.Text('Shell Options:')],
+        [sg.Checkbox('Save session to file', key='-SAVE_SHELL_SESSION-'), 
+         sg.Checkbox('No console output', key='-AI_ONLY-', default=True)],
+        [sg.HorizontalSeparator()],
+        [sg.Frame('Shell Output', [
+            [sg.Multiline(size=(124, 10), key='-SHELL_OUTPUT-', expand_x=True, expand_y=True, disabled=True)]
+        ], expand_x=True, expand_y=True)],
+        [sg.HorizontalSeparator()],
+        [sg.Column([
+            [sg.Button('Start', key='-START_SHELL-', size=(10, 1)),  # Start button
+             sg.Button('Send', key='-SEND_SHELL-', size=(10, 1), disabled=True),  # Initially disabled
+             sg.Button('Clear', key='-CLEAR_SHELL-', size=(10, 1)),
+             sg.Button('Done', key='-DONE_SHELL-', size=(10, 1)),  # Done button
+             sg.Push(), sg.Text('Option:'),
+             sg.Checkbox('Export Session', key='-EXPORT_SHELL_SESSION-')]
+        ], element_justification='center', expand_x=True)],
+    ], key='-THREAT_HUNT_LOCAL_SHELL_TAB-')
 
 def create_gui_layout():
     layout = [
@@ -386,7 +476,8 @@ def create_gui_layout():
                     [sg.Button('Analyze', key='-ANALYZE_PCAP-', size=(10, 1)), sg.Button('Clear', key='-CLEAR_PCAP_RESULTS-', size=(10, 1)), sg.Push(), sg.Text('Options:'), sg.Checkbox('Save I/O', key='-SAVE_PCAP_RESULTS-'), sg.Checkbox('Export Report', key='-EXPORT_PCAP_RESULTS-')]
                 ], element_justification='center', expand_x=True)],
             ], key='-PCAP_TAB-')],
-             [create_detection_rule_builder_tab()]  # Add the new tab
+             [create_detection_rule_builder_tab()],  # New tab
+             [create_threat_hunt_local_shell_tab()]  # New tab
             ], expand_x=True, expand_y=True)],
         [sg.HorizontalSeparator()],
         [sg.Text(THREATSCOUT_VERSION + ' :: ' + 'Powered by AI'), sg.Push(), sg.Text('Progress:'), sg.ProgressBar(100, orientation='h', size=(15, 20), key='-PROGRESS-'), sg.VerticalSeparator(), sg.Text('Status:'), sg.Text('- Ready -', size=(25, 1), key='-STATUS-', justification='right')]
@@ -541,11 +632,35 @@ def main():
     # Initialize conversation history
     conversation_history = [{'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'}]
 
+   # Configure the interpreter
+    interpreter.model = "gpt-4o"
+    interpreter.llm.api_key = api_key
+    interpreter.llm.max_tokens = 1000
+    interpreter.llm.context_window = 3000
+    interpreter.auto_run = True
+    interpreter.llm.supports_functions = True
+
+    # Set custom system message
+    interpreter.system_message = """
+    Enable advanced security checks.
+    Increase verbosity for system logs.
+    Prioritize threat hunting commands.
+    """
+
+    # Bind the Enter key to the "Send" button
+    window.bind('<Return>', '-SEND_SHELL-')
+
+    # Initialize a flag to track if the event has been triggered before
+    first_send_shell = True
+
+
     while True:
         event, values = window.read()
         print(f"Event: {event}")  # Debugging statement
+
         if event in (sg.WINDOW_CLOSED, 'Exit'):
-            break
+            if event in (sg.WINDOW_CLOSED, 'Exit'):
+                break
 
         elif event == 'Analyze':
             if client is None:
@@ -772,13 +887,80 @@ def main():
                         else:  # For Linux
                             subprocess.call(('xdg-open', report_path))
                 window['-STATUS-'].update('Done')
-
+  
         elif event == '-CLEAR_RULE-':
             window['-PROMPT_INPUT-'].update('')
             window['-RULE_OUTPUT-'].update('')
             window['-PROGRESS-'].update_bar(0)  # Reset the progress bar
             window['-STATUS-'].update('- Ready -')  # Update status to Ready
             save_config(prompt_input='', rule_output='')
+
+        elif event == '-START_SHELL-':
+            # Enable the input and send button when Start is pressed
+            window['-SHELL_PROMPT_INPUT-'].update(disabled=False)
+            window['-SEND_SHELL-'].update(disabled=False)
+        
+        elif event == '-SEND_SHELL-':
+            # Handle sending shell command
+            command = values['-SHELL_PROMPT_INPUT-']
+            ai_only = values['-AI_ONLY-']  # Get the checkbox state
+            window['-STATUS-'].update('Executing command...')
+            window['-PROGRESS-'].update_bar(0)
+            
+            try:
+                shell_output = execute_command(window, command, ai_only=ai_only)
+                window['-STATUS-'].update('Command executed successfully.')
+                window['-PROGRESS-'].update_bar(100)
+            except Exception as e:
+                window['-STATUS-'].update(f'Error: {str(e)}')
+                window['-PROGRESS-'].update_bar(0)
+            
+            # Add \n\n to separate the outputs, but skip this for the first execution
+            if not first_send_shell:
+                window['-SHELL_OUTPUT-'].update('\n\n', append=True)
+            else:
+                first_send_shell = False  # Set the flag to False after the first execution
+            
+            # Append the new shell output to the existing content
+            window['-SHELL_OUTPUT-'].update(shell_output, append=True)
+
+            # Clear the input field after sending
+            window['-SHELL_PROMPT_INPUT-'].update('')
+
+        elif event == '-CLEAR_SHELL-':
+            # Clear input and output
+            window['-SHELL_PROMPT_INPUT-'].update('')
+            window['-SHELL_OUTPUT-'].update('')
+            window['-PROGRESS-'].update_bar(0)  # Clear the progress bar
+            window['-STATUS-'].update('- Ready -')  # Reset status
+            first_send_shell = True  # Reset the flag when cleared
+
+        elif event == '-DONE_SHELL-':
+            # Disable input and send button when Done is pressed
+            window['-SHELL_PROMPT_INPUT-'].update(disabled=True)
+            window['-SEND_SHELL-'].update(disabled=True)
+
+            # Save and export session if checkboxes are checked
+            shell_output = window['-SHELL_OUTPUT-'].get()
+            
+            if values['-SAVE_SHELL_SESSION-']:
+                file_name = save_to_file(shell_output, 'Shell_Session', '.txt')
+                sg.popup('Session Saved', f'Session saved as {file_name}')
+            
+            if values['-EXPORT_SHELL_SESSION-']:
+                docx_name = save_report(shell_output, 'Shell_Session.docx')
+                if docx_name:
+                    response = sg.popup('Session Exported', f'Session exported as {docx_name}', custom_text=('Open', 'Close'))
+                    if response == 'Open':
+                        if os.name == 'nt':  # Windows
+                            os.startfile(docx_name)
+                        elif os.name == 'posix':  # macOS and Linux
+                            if sys.platform == 'darwin':  # macOS
+                                subprocess.call(('open', docx_name))
+                            else:  # Linux
+                                subprocess.call(('xdg-open', docx_name))
+                else:
+                    sg.popup('Error', 'Failed to export session.')
 
         elif event == 'API Key':
             api_key_win = api_key_window(api_key)
