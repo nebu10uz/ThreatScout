@@ -12,16 +12,20 @@ from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.dns import DNS, DNSQR
 import pypandoc
 from docx import Document
+from datetime import datetime
 import PyPDF2
 from interpreter import interpreter
+import requests
 
-THREATSCOUT_VERSION = 'ThreatScout version 0.5'
+
+THREATSCOUT_VERSION = 'ThreatScout v0.6'
 CONFIG_FILE = 'config.json'
 KEY_FILE = 'key.key'
 
 # Path to ThreatScout logo images
 logo_image_path = 'Images/Docrop2.png'
 text_image_path = 'Images/big_ThreatScout.png'
+about_image_path = 'Images/About_logo.png'
 
 def generate_key():
     key = Fernet.generate_key()
@@ -48,14 +52,14 @@ def decrypt_api_key(encrypted_api_key):
         sg.popup('Error', 'Failed to decrypt the API key. Please re-enter your API key.')
         return None
 
-def save_config(api_key=None, theme=None, analyze_file_path=None, analyze_output=None,
-                hypothesis_file_path=None, hypothesis_output=None, pcap_file_path=None,
-                pcap_output=None, pcap_alerts_path=None, rule_output=None, prompt_input=None):
+def save_config(api_key=None, theme=None, analyze_file_path=None, analyze_output=None, 
+                hypothesis_file_path=None, hypothesis_output=None, pcap_file_path=None, 
+                pcap_output=None, pcap_alerts_path=None, rule_output=None, prompt_input=None, 
+                use_local_model=None, local_model_url=None, supports_functions=None):
     config = {}
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as config_file:
             config = json.load(config_file)
-
     if api_key:
         config['ENCRYPTED_OPENAI_API_KEY'] = encrypt_api_key(api_key)
     if theme:
@@ -78,7 +82,12 @@ def save_config(api_key=None, theme=None, analyze_file_path=None, analyze_output
         config['RULE_OUTPUT'] = rule_output
     if prompt_input is not None:
         config['PROMPT_INPUT'] = prompt_input
-
+    if use_local_model is not None:
+        config['USE_LOCAL_MODEL'] = use_local_model
+    if local_model_url is not None:
+        config['LOCAL_MODEL_URL'] = local_model_url
+    if supports_functions is not None:
+        config['SUPPORTS_FUNCTIONS'] = supports_functions
     with open(CONFIG_FILE, 'w') as config_file:
         json.dump(config, config_file)
 
@@ -86,7 +95,6 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as config_file:
             config = json.load(config_file)
-
         encrypted_api_key = config.get('ENCRYPTED_OPENAI_API_KEY')
         theme = config.get('THEME', 'DarkGrey16')
         analyze_file_path = config.get('ANALYZE_FILE_PATH', '')
@@ -98,32 +106,84 @@ def load_config():
         pcap_alerts_path = config.get('PCAP_ALERTS_PATH', '')
         rule_output = config.get('RULE_OUTPUT', '')
         prompt_input = config.get('PROMPT_INPUT', '')
-
+        use_local_model = config.get('USE_LOCAL_MODEL', False)
+        local_model_url = config.get('LOCAL_MODEL_URL', 'http://localhost:1234')
+        supports_functions = config.get('SUPPORTS_FUNCTIONS', True)
         if encrypted_api_key:
-            return (decrypt_api_key(encrypted_api_key), theme, analyze_file_path, analyze_output,
-                    hypothesis_file_path, hypothesis_output, pcap_file_path, pcap_output,
-                    pcap_alerts_path, rule_output, prompt_input)
+            return (decrypt_api_key(encrypted_api_key), theme, analyze_file_path, analyze_output, 
+                    hypothesis_file_path, hypothesis_output, pcap_file_path, pcap_output, 
+                    pcap_alerts_path, rule_output, prompt_input, use_local_model, local_model_url, 
+                    supports_functions)
+    return None, 'DarkGrey16', '', '', '', '', '', '', '', '', '', False, 'http://localhost:1234', True
 
-    return None, 'DarkGrey16', '', '', '', '', '', '', '', '', ''
-
-def call_gpt(client, prompt, history=None):
-    if not history:
+def call_local_model(prompt, local_model_url):
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    # Ensure the prompt is a list of message objects
+    if isinstance(prompt, str):
+        messages = [{"role": "user", "content": prompt}]
+    elif isinstance(prompt, list):
+        # Filter out messages with unexpected roles
         messages = [
-            {'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'},
-            {'role': 'user', 'content': prompt}
-    ]
+            msg for msg in prompt 
+            if msg.get('role') in ['user', 'assistant', 'system']
+        ]
     else:
-        messages = prompt
+        raise ValueError("Prompt must be a string or a list of message objects")
 
-    response = client.chat.completions.create(
-        model='gpt-4o',
-        messages=messages,
-        max_tokens=2048,
-        n=1,
-        stop=None,
-        temperature=0.7
-    )
-    return response.choices[0].message.content.strip()
+    data = {
+        "model": "local-model",
+        "messages": messages,
+        "temperature": 0.7
+    }
+
+    try:
+        response = requests.post(f"{local_model_url}/v1/chat/completions", headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        if 'choices' in result and len(result['choices']) > 0:
+            return result['choices'][0]['message']['content']
+        else:
+            raise ValueError("Unexpected response structure: 'choices' key missing or empty.")
+    except requests.exceptions.RequestException as e:
+        return f"Request error: {str(e)}"
+    except ValueError as e:
+        return f"Response error: {str(e)}"
+
+def call_gpt(client, prompt, history=None, use_local_model=False, local_model_url=None):
+    print(use_local_model, local_model_url) #Debug
+    if use_local_model:
+        return call_local_model(prompt, local_model_url)
+    else:
+        if not history:
+            messages = [
+                {'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'},
+                {'role': 'user', 'content': prompt}
+            ]
+        else:
+            messages = prompt
+
+        response = client.chat.completions.create(
+            model='gpt-4o',
+            messages=messages,
+            max_tokens=2048,
+            n=1,
+            stop=None,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+
+def open_file(file_path):
+    """Open a file using the default application based on the operating system."""
+    if os.name == 'nt':  # For Windows
+        os.startfile(file_path)
+    elif os.name == 'posix':  # For macOS and Linux
+        if sys.platform == 'darwin':  # Specifically for macOS
+            subprocess.call(('open', file_path))
+        else:  # For Linux
+            subprocess.call(('xdg-open', file_path))
 
 def read_docx(file_path):
     doc = Document(file_path)
@@ -149,7 +209,8 @@ def read_file(file_path):
         with open(file_path, 'r') as file:
             return file.read()
 
-def analyze_threat_data(client, file_path, window):
+def analyze_threat_data(client, file_path, window, use_local_model, local_model_url):
+    print(use_local_model, local_model_url + ' within analyze_threat_data') #Debug
     try:
         raw_data = read_file(file_path)
     except FileNotFoundError:
@@ -158,15 +219,17 @@ def analyze_threat_data(client, file_path, window):
 
     window['-PROGRESS-'].update_bar(0)
     window['-STATUS-'].update('Analyzing threats...')
-    identified_threats = call_gpt(client, f'Analyze the following threat data and identify potential threats: {raw_data}')
+    print('Here 1') #Debug
+    identified_threats = call_gpt(client, f'Analyze the following threat data and identify potential threats: {raw_data}', use_local_model=use_local_model, local_model_url=local_model_url)
     window['-PROGRESS-'].update_bar(33)
     window['-STATUS-'].update('Extracting IOCs...')
+    print('Here 2') #Debug
     extracted_iocs = call_gpt(client, f'''Extract all indicators of compromise (IoCs) and Tactics, Techniques and Procedures (TTPs)
     from the following threat data and create a table with the results.
-    Please ensure that all tables in the document are formatted to fit their content optimally: {raw_data}''')
+    Please ensure that all tables in the document are formatted to fit their content optimally: {raw_data}''', use_local_model=use_local_model, local_model_url=local_model_url)
     window['-PROGRESS-'].update_bar(66)
     window['-STATUS-'].update('Providing threat context...')
-    threat_context = call_gpt(client, f'Provide a detailed context or narrative behind the identified threats in this data: {raw_data}')
+    threat_context = call_gpt(client, f'Provide a detailed context or narrative behind the identified threats in this data: {raw_data}', use_local_model=use_local_model, local_model_url=local_model_url)
     window['-PROGRESS-'].update_bar(100)
     window['-STATUS-'].update('Analysis complete.')
     return identified_threats, extracted_iocs, threat_context
@@ -180,21 +243,38 @@ def markdown_to_docx(markdown_text: str, output_file: str) -> bool:
         print(f"Error during conversion: {e}")
         return False
 
-def save_report(output, report_name):
-    if not os.path.exists('Reports'):
-        os.makedirs('Reports')
-    
-    base_name, extension = os.path.splitext(report_name)
-    index = 1
-    report_path = os.path.join('Reports', report_name)
-    while os.path.exists(report_path):
-        report_name = f"{base_name}_{index}{extension}"
-        report_path = os.path.join('Reports', report_name)
-        index += 1
-    
-    if markdown_to_docx(output, report_path):
-        return report_path
-    else:
+def save_report(content, filename):
+    """Save content to a file, either as plain text, Word document, or convert from markdown."""
+    try:
+        # Get the current date and time
+        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Split the filename into name and extension
+        name, ext = os.path.splitext(filename)
+        
+        # Create a new filename with the current timestamp
+        new_filename = f"{name}_{current_time}{ext}"
+        
+        # Ensure the 'Reports' directory exists
+        if not os.path.exists('Reports'):
+            os.makedirs('Reports')
+        
+        # Create the full path for the new file
+        full_path = os.path.join('Reports', new_filename)
+        
+        # Ensure the file doesn't already exist (although it's unlikely with the timestamp)
+        counter = 1
+        while os.path.exists(full_path):
+            new_filename = f"{name}_{current_time}_{counter}{ext}"
+            full_path = os.path.join('Reports', new_filename)
+            counter += 1
+        
+        if markdown_to_docx(content, full_path):
+            return full_path
+        else:
+            return None
+    except Exception as e:
+        sg.popup_error(f"Error saving report: {str(e)}")
         return None
 
 def save_to_file(content, base_name, extension):
@@ -339,45 +419,46 @@ def analyze_pcap_file(window, pcap_path, alerts_path=None):
 
     return pcap_summary
 
-def execute_command(window, command, ai_only=False):
+def execute_command(window, command, ai_only=False, use_local_model=False, local_model_url=None):
     try:
+        print(use_local_model, local_model_url + ' ' + str(interpreter.llm.api_base)) #Debug
         full_response = []
         first_chunk = True
         previous_type = None
         password_prompt = False
-        
         window['-PROGRESS-'].update_bar(50)
+
+        # Use the interpreter for both local and OpenAI models
+        print(command) #Debug
         for chunk in interpreter.chat(command, stream=True, display=False):
             if chunk["type"] in ["message", "console", "input"]:
                 if "content" in chunk and chunk["content"] is not None:
                     content = str(chunk["content"])
-                    
                     # Filter out console responses if the checkbox is checked
                     if ai_only and chunk["type"] != "message":
                         continue
-                    
                     if first_chunk:
                         content = content.lstrip('1').lstrip()
                         first_chunk = False
-                    
                     # Add a newline if the type changes
                     if previous_type and previous_type != chunk["type"]:
                         full_response.append('\n\n')
-                    
                     full_response.append(content)
                     previous_type = chunk["type"]
-                    
                     # Check for password prompt
                     if any(keyword in content.lower() for keyword in ["Password:", "sudo", "authentication"]):
                         password_prompt = True
-                        break  # Exit the loop if a password prompt is detected
-        
+                        break
+
+        # Exit the loop if a password prompt is detected
         if password_prompt:
             return "Password prompt detected. Unable to proceed automatically."
         else:
-            return ''.join(full_response).strip()
+            return ''.join(str(item) for item in full_response).strip()
     except Exception as e:
-        return f"Error executing command: {str(e)}"
+        error_message = f"Error executing command: {str(e)}"
+        window['-STATUS-'].update(error_message)  # Update status with error message
+        return error_message
     
 def create_detection_rule_builder_tab():
     default_prompt_text = (
@@ -436,7 +517,7 @@ def create_gui_layout():
         [sg.Image(filename=text_image_path, key='-THREATSCOUT-TXT-IMAGE-'), sg.Text('Threat Hunt Assist Tool'),
          sg.Push(),  # This will push the next elements to the far right
          sg.Image(filename=logo_image_path, key='-THREATSCOUTLOGO-IMAGE-', pad=((0, 0), (10, 0)))],
-        [sg.Menu([['File', ['Exit']], ['Settings', ['API Key', 'Theme']], ['Help', ['About']]])],
+        [sg.Menu([['File', ['Exit']], ['Settings', ['API Key', 'AI Model', 'Theme']], ['Help', ['About']]])],
         [sg.TabGroup([[
             sg.Tab('Threat Report Analyzer', [
                 [sg.HorizontalSeparator()],
@@ -480,14 +561,18 @@ def create_gui_layout():
              [create_threat_hunt_local_shell_tab()]  # New tab
             ], expand_x=True, expand_y=True)],
         [sg.HorizontalSeparator()],
-        [sg.Text(THREATSCOUT_VERSION + ' :: ' + 'Powered by AI'), sg.Push(), sg.Text('Progress:'), sg.ProgressBar(100, orientation='h', size=(15, 20), key='-PROGRESS-'), sg.VerticalSeparator(), sg.Text('Status:'), sg.Text('- Ready -', size=(25, 1), key='-STATUS-', justification='right')]
+        [sg.Text(THREATSCOUT_VERSION + ' :: ' + 'Powered by'),
+         sg.Text('OpenAI', size=(10, 1), key='-AI-MODEL-'), 
+         sg.Push(), 
+         sg.Text('Progress:'), sg.ProgressBar(100, orientation='h', size=(15, 20), key='-PROGRESS-'), 
+         sg.VerticalSeparator(), sg.Text('Status:'), sg.Text('- Ready -', size=(25, 1), key='-STATUS-', justification='right')]
     ]
     return layout
 
 def api_key_window(api_key):
     layout = [
         [sg.Text('API Key:'), sg.InputText(api_key, key='-API_KEY-', password_char='*')],
-        [sg.Button('Save API Key')]
+        [sg.Button('Save API Key'), sg.Button('Cancel')]  # Added Cancel button
     ]
     return sg.Window('API Key Settings', layout)
 
@@ -495,11 +580,21 @@ def theme_window(current_theme):
     themes = sg.theme_list()
     layout = [
         [sg.Text('Select Theme:'), sg.Combo(themes, default_value=current_theme, key='-THEME-', readonly=True)],
-        [sg.Button('Save Theme')]
+        [sg.Button('Save Theme'), sg.Button('Cancel')]  # Added Cancel button
     ]
     return sg.Window('Theme Settings', layout)
 
-def build_threat_hypothesis(client, file_path, window):
+def ai_model_window(use_local_model, local_model_url, supports_functions):
+    layout = [
+        [sg.Checkbox('Use Local AI Model', default=use_local_model, key='-USE_LOCAL_MODEL-', enable_events=True)],
+        [sg.Text('Local Model URL:'), sg.InputText(local_model_url or 'http://localhost:1234', key='-LOCAL_MODEL_URL-', disabled=not use_local_model)],
+        [sg.Text('Support function calls:'), sg.Radio('Yes', 'FUNCTION_CALLS', default=supports_functions, key='-SUPPORT_FUNCTIONS_YES-'), 
+         sg.Radio('No', 'FUNCTION_CALLS', default=not supports_functions, key='-SUPPORT_FUNCTIONS_NO-')],
+        [sg.Button('Save Settings'), sg.Button('Reset Settings'), sg.Button('Cancel')]
+    ]
+    return sg.Window('AI Model Settings', layout, finalize=True)
+
+def build_threat_hypothesis(client, file_path, window, use_local_model, local_model_url):
     try:
         threat_report = read_file(file_path)
     except FileNotFoundError:
@@ -544,15 +639,20 @@ def build_threat_hypothesis(client, file_path, window):
     """
 
     window['-PROGRESS-'].update_bar(50)
-    hypothesis = call_gpt(client, prompt)
+    hypothesis = call_gpt(client, prompt, use_local_model=use_local_model, local_model_url=local_model_url)
     window['-THREAT_HYPOTHESIS-'].update(hypothesis)
     window['-PROGRESS-'].update_bar(100)
     window['-STATUS-'].update('Hypothesis built.')
 
-def build_rule(client, window, values, conversation_history):
+def build_rule(client, window, values, conversation_history, use_local_model, local_model_url):
     # Retrieve user's prompt input
     user_prompt = values['-PROMPT_INPUT-'].strip()
-    
+
+    # Check if the prompt is empty
+    if not user_prompt:
+        sg.popup('Error', 'The prompt input is empty. Please enter a prompt before building the rule.')
+        return conversation_history  # Return the existing conversation history without changes
+
     # Check which rule options are selected
     selected_rules = []
     if values['-SIGMA-']:
@@ -563,52 +663,79 @@ def build_rule(client, window, values, conversation_history):
         selected_rules.append('Suricata')
     if values['-KQL-']:
         selected_rules.append('KQL')
-    
+
     # Ensure at least one rule is selected
     if not selected_rules:
         sg.popup('Error', 'At least one rule must be selected to build the rule.')
         return
-    
+
     # Update status and progress
     window['-STATUS-'].update('Building rule...')
     window['-PROGRESS-'].update_bar(0)
-    
+
     # Create the static prompt with placeholders
     rules = ', '.join(selected_rules)
     static_prompt = f"Can you help me draft a {rules} rule to detect this specific activity?"
-    
+
     # Combine the user's prompt with the static prompt
     full_prompt = f"{user_prompt}\n\n{static_prompt}"
-    
+
     # Add the user's input to the conversation history
     conversation_history.append({'role': 'user', 'content': full_prompt})
-    
+
     # Call the OpenAI API with the conversation history
     try:
         window['-PROGRESS-'].update_bar(50)
-        rule_output = call_gpt(client, conversation_history, history=True)
+        rule_output = call_gpt(client, conversation_history, use_local_model=use_local_model, local_model_url=local_model_url, history=True)
         conversation_history.append({'role': 'assistant', 'content': rule_output})
         window['-RULE_OUTPUT-'].update(rule_output)
         window['-STATUS-'].update('Rule built successfully.')
     except Exception as e:
         sg.popup('An error occurred while generating the rule', str(e))
         window['-STATUS-'].update('Error occurred.')
-    
+
     # Update progress to complete
     window['-PROGRESS-'].update_bar(100)
-
     return conversation_history
 
+def configure_interpreter(use_local_model, api_key, local_model_url, supports_functions):
+    interpreter.model = "gpt-4o" if not use_local_model else "openai/x"
+    interpreter.llm.api_key = api_key if not use_local_model else "not-needed"
+    interpreter.llm.api_base = None if not use_local_model else local_model_url + '/v1/'
+    interpreter.llm.max_tokens = 1000
+    interpreter.llm.context_window = 3000
+    interpreter.messages = []  # reset conversation history
+    interpreter.auto_run = True
+    interpreter.llm.supports_functions = supports_functions
+    interpreter.offline = use_local_model
+    interpreter.system_message = """
+    Enable advanced security checks.
+    Increase verbosity for system logs.
+    Prioritize threat hunting commands.
+    """
+
 def main():
-    (api_key, theme, analyze_file_path, analyze_output, hypothesis_file_path, hypothesis_output,
-     pcap_file_path, pcap_output, pcap_alerts_path, rule_output, prompt_input) = load_config()
-    
+    (api_key, theme, analyze_file_path, analyze_output, hypothesis_file_path, hypothesis_output, 
+     pcap_file_path, pcap_output, pcap_alerts_path, rule_output, prompt_input, use_local_model, 
+     local_model_url, supports_functions) = load_config()
 
     sg.theme(theme)
     sg.set_options(font=('Helvetica', 12))
     layout = create_gui_layout()
     window = sg.Window('.:: ThreatScout ::.', layout, size=(805, 625), resizable=True, finalize=True)
-    client = openai.OpenAI(api_key=api_key) if api_key else None
+
+    # client = openai.OpenAI(api_key=api_key) if api_key and not use_local_model else None
+
+    # Initialize the client based on the configuration
+    client = None
+    if api_key and not use_local_model:
+        client = openai.OpenAI(api_key=api_key)
+
+    # Update the AI model status in the UI
+    if use_local_model:
+        window['-AI-MODEL-'].update('Local AI')
+    else:
+        window['-AI-MODEL-'].update('OpenAI')
 
     if analyze_file_path:
         window['-FILE_PATH-'].update(analyze_file_path)
@@ -632,20 +759,8 @@ def main():
     # Initialize conversation history
     conversation_history = [{'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'}]
 
-   # Configure the interpreter
-    interpreter.model = "gpt-4o"
-    interpreter.llm.api_key = api_key
-    interpreter.llm.max_tokens = 1000
-    interpreter.llm.context_window = 3000
-    interpreter.auto_run = True
-    interpreter.llm.supports_functions = True
-
-    # Set custom system message
-    interpreter.system_message = """
-    Enable advanced security checks.
-    Increase verbosity for system logs.
-    Prioritize threat hunting commands.
-    """
+    # Configure the interpreter
+    configure_interpreter(use_local_model, api_key, local_model_url, supports_functions)
 
     # Bind the Enter key to the "Send" button
     window.bind('<Return>', '-SEND_SHELL-')
@@ -653,17 +768,15 @@ def main():
     # Initialize a flag to track if the event has been triggered before
     first_send_shell = True
 
-
     while True:
         event, values = window.read()
         print(f"Event: {event}")  # Debugging statement
 
         if event in (sg.WINDOW_CLOSED, 'Exit'):
-            if event in (sg.WINDOW_CLOSED, 'Exit'):
-                break
+            break
 
         elif event == 'Analyze':
-            if client is None:
+            if client is None and not use_local_model:
                 sg.popup('API key is not set!')
                 continue
             file_path = values['-FILE_PATH-']
@@ -672,7 +785,8 @@ def main():
                 continue
             window['-STATUS-'].update('Starting analysis...')
             try:
-                identified_threats, extracted_iocs, threat_context = analyze_threat_data(client, file_path, window)
+                print(use_local_model, local_model_url + ' within main function') #Debug
+                identified_threats, extracted_iocs, threat_context = analyze_threat_data(client, file_path, window, use_local_model, local_model_url)
                 if identified_threats and extracted_iocs and threat_context:
                     output = f'Identified Threats:\n{identified_threats}\n\nExtracted IoCs:\n{extracted_iocs}\n\nThreat Context:\n{threat_context}'
                     window['-OUTPUT-'].update(output)
@@ -687,32 +801,11 @@ def main():
                         window['-PROGRESS-'].update_bar(100)
                         response = sg.popup('Report Generated!', f'Report saved at: {report_path}', custom_text=('Open', 'Close'), keep_on_top=True)
                         if response == 'Open':
-                            if os.name == 'nt':  # For Windows
-                                os.startfile(report_path)
-                            elif os.name == 'posix':  # For macOS and Linux
-                                if sys.platform == 'darwin':  # Specifically for macOS
-                                    subprocess.call(('open', report_path))
-                                else:  # For Linux
-                                    subprocess.call(('xdg-open', report_path))
+                            open_file(report_path)
                         window['-STATUS-'].update('Done')
-            except openai.AuthenticationError:
-                sg.popup('Authentication Error', 'Incorrect API key provided. Please check your API key and try again.')
-                window['-STATUS-'].update('Authentication Error')
-            except openai.BadRequestError:
-                sg.popup('Bad Request Error', 'The request was invalid. Please check your input and try again.')
-                window['-STATUS-'].update('Invalid Request Error')
-            except openai.RateLimitError:
-                sg.popup('Rate Limit Error', 'Rate limit exceeded. Please wait and try again.')
-                window['-STATUS-'].update('Rate Limit Error')
-            except openai.APIConnectionError:
-                sg.popup('API Connection Error', 'Failed to connect to the API. Please check your network connection and try again.')
-                window['-STATUS-'].update('API Connection Error')
-            except openai.APIError:
-                sg.popup('API Error', 'An error occurred with the API. Please try again later.')
-                window['-STATUS-'].update('API Error')
             except Exception as e:
-                sg.popup('An unexpected error occurred', str(e))
-                window['-STATUS-'].update('Unexpected Error')
+                sg.popup('An error occurred', str(e))
+                window['-STATUS-'].update('Error')
 
         elif event == 'Clear':
             window['-FILE_PATH-'].update('')
@@ -722,7 +815,7 @@ def main():
             save_config(analyze_file_path='', analyze_output='')
 
         elif event == '-BUILD_HYPOTHESIS-':
-            if client is None:
+            if client is None and not use_local_model:
                 sg.popup('API key is not set!')
                 continue
 
@@ -731,7 +824,7 @@ def main():
                 sg.popup('Error', 'No threat report file selected. Please select a threat report file.')
                 continue
             window['-STATUS-'].update('Building threat hypothesis...')
-            build_threat_hypothesis(client, threat_report_path, window)
+            build_threat_hypothesis(client, threat_report_path, window, use_local_model, local_model_url,)
 
             if values['-SAVE_HYPOTHESIS-']:
                 save_config(hypothesis_file_path=threat_report_path, hypothesis_output=window['-THREAT_HYPOTHESIS-'].get())
@@ -744,13 +837,7 @@ def main():
                 window['-PROGRESS-'].update_bar(100)
                 response = sg.popup('Report Generated!', f'Report saved at: {report_path}', custom_text=('Open', 'Close'), keep_on_top=True)
                 if response == 'Open':
-                    if os.name == 'nt':  # For Windows
-                        os.startfile(report_path)
-                    elif os.name == 'posix':  # For macOS and Linux
-                        if sys.platform == 'darwin':  # Specifically for macOS
-                            subprocess.call(('open', report_path))
-                        else:  # For Linux
-                            subprocess.call(('xdg-open', report_path))
+                    open_file(report_path)
                 window['-STATUS-'].update('Done')
 
         elif event == '-CLEAR_HYPOTHESIS-':
@@ -768,6 +855,10 @@ def main():
             window['-ALERTS_FILE_BROWSE-'].update(disabled=not is_checked)
 
         elif event == '-ANALYZE_PCAP-':
+            if client is None and not use_local_model:
+                sg.popup('API key is not set!')
+                continue
+        
             pcap_path = values['-PCAP_FILE_PATH-']
             include_alerts = values['-INCLUDE_ALERTS-']
             alerts_path = values['-ALERTS_FILE_PATH-'] if include_alerts else None
@@ -820,7 +911,7 @@ def main():
                 # Send combined data to OpenAI API for analysis
                 window['-STATUS-'].update('Sending data to AI for analysis...')
                 window['-PROGRESS-'].update_bar(50)
-                pcap_analysis = call_gpt(client, prompt)
+                pcap_analysis = call_gpt(client, prompt, use_local_model=use_local_model, local_model_url=local_model_url,)
                 window['-PCAP_RESULTS-'].update('\n\n', append=True)
                 window['-PCAP_RESULTS-'].update(pcap_analysis, append=True)
 
@@ -839,13 +930,7 @@ def main():
                     window['-PROGRESS-'].update_bar(100)
                     response = sg.popup('Report Generated!', f'Report saved at: {report_path}', custom_text=('Open', 'Close'), keep_on_top=True)
                     if response == 'Open':
-                        if os.name == 'nt':  # For Windows
-                            os.startfile(report_path)
-                        elif os.name == 'posix':  # For macOS and Linux
-                            if sys.platform == 'darwin':  # Specifically for macOS
-                                subprocess.call(('open', report_path))
-                            else:  # For Linux
-                                subprocess.call(('xdg-open', report_path))
+                        open_file(report_path)
                     window['-STATUS-'].update('Done')
             except Exception as e:
                 sg.popup('An error occurred during PCAP analysis', str(e))
@@ -860,8 +945,12 @@ def main():
             save_config(pcap_file_path='', pcap_output='', pcap_alerts_path='')
 
         elif event == '-BUILD_RULE-':
-        # Handle building the detection rule using OpenAI API
-            conversation_history = build_rule(client, window, values, conversation_history)
+            if client is None and not use_local_model:
+                sg.popup('API key is not set!')
+                continue
+
+            # Handle building the detection rule using OpenAI API
+            conversation_history = build_rule(client, window, values, conversation_history, use_local_model, local_model_url,)
 
             # Handle Save I/O and Export Rule options
             if values['-SAVE_RULE-']:
@@ -879,13 +968,7 @@ def main():
                 window['-PROGRESS-'].update_bar(100)
                 response = sg.popup('Report Generated!', f'Report saved at: {report_path}', custom_text=('Open', 'Close'), keep_on_top=True)
                 if response == 'Open':
-                    if os.name == 'nt':  # For Windows
-                        os.startfile(report_path)
-                    elif os.name == 'posix':  # For macOS and Linux
-                        if sys.platform == 'darwin':  # Specifically for macOS
-                            subprocess.call(('open', report_path))
-                        else:  # For Linux
-                            subprocess.call(('xdg-open', report_path))
+                    open_file(report_path)
                 window['-STATUS-'].update('Done')
   
         elif event == '-CLEAR_RULE-':
@@ -896,6 +979,10 @@ def main():
             save_config(prompt_input='', rule_output='')
 
         elif event == '-START_SHELL-':
+            if client is None and not use_local_model:
+                sg.popup('API key is not set!')
+                continue
+
             # Enable the input and send button when Start is pressed
             window['-SHELL_PROMPT_INPUT-'].update(disabled=False)
             window['-SEND_SHELL-'].update(disabled=False)
@@ -908,7 +995,10 @@ def main():
             window['-PROGRESS-'].update_bar(0)
             
             try:
-                shell_output = execute_command(window, command, ai_only=ai_only)
+                print(use_local_model, local_model_url) #Debug
+                shell_output = execute_command(window, command, ai_only=ai_only, 
+                                       use_local_model=use_local_model, 
+                                       local_model_url=local_model_url)
                 window['-STATUS-'].update('Command executed successfully.')
                 window['-PROGRESS-'].update_bar(100)
             except Exception as e:
@@ -952,13 +1042,7 @@ def main():
                 if docx_name:
                     response = sg.popup('Session Exported', f'Session exported as {docx_name}', custom_text=('Open', 'Close'))
                     if response == 'Open':
-                        if os.name == 'nt':  # Windows
-                            os.startfile(docx_name)
-                        elif os.name == 'posix':  # macOS and Linux
-                            if sys.platform == 'darwin':  # macOS
-                                subprocess.call(('open', docx_name))
-                            else:  # Linux
-                                subprocess.call(('xdg-open', docx_name))
+                        open_file(docx_name)
                 else:
                     sg.popup('Error', 'Failed to export session.')
 
@@ -966,7 +1050,7 @@ def main():
             api_key_win = api_key_window(api_key)
             while True:
                 api_key_event, api_key_values = api_key_win.read()
-                if api_key_event in (sg.WINDOW_CLOSED, 'Exit'):
+                if api_key_event in (sg.WINDOW_CLOSED, 'Exit', 'Cancel'):  # Handle Cancel button
                     break
                 elif api_key_event == 'Save API Key':
                     api_key = api_key_values['-API_KEY-']
@@ -989,11 +1073,67 @@ def main():
                         break
             api_key_win.close()
 
+        elif event == 'AI Model':
+            ai_model_win = ai_model_window(use_local_model, local_model_url, supports_functions)
+            settings_changed = False
+            while True:
+                ai_model_event, ai_model_values = ai_model_win.read()
+                if ai_model_event in (sg.WINDOW_CLOSED, 'Cancel'):
+                    break
+                elif ai_model_event == '-USE_LOCAL_MODEL-':
+                    # Enable or disable the Local Model URL input based on the checkbox
+                    ai_model_win['-LOCAL_MODEL_URL-'].update(disabled=not ai_model_values['-USE_LOCAL_MODEL-'])
+                elif ai_model_event == 'Save Settings':
+                    new_use_local_model = ai_model_values['-USE_LOCAL_MODEL-']
+                    new_local_model_url = ai_model_values['-LOCAL_MODEL_URL-']
+                    new_supports_functions = ai_model_values['-SUPPORT_FUNCTIONS_YES-']
+                    if new_use_local_model and not new_local_model_url.startswith(('http://', 'https://')):
+                        sg.popup_error('Invalid URL', 'Please enter a valid URL starting with http:// or https://')
+                        continue
+                    use_local_model = new_use_local_model
+                    local_model_url = new_local_model_url
+                    supports_functions = new_supports_functions
+                    save_config(use_local_model=use_local_model, local_model_url=local_model_url, supports_functions=supports_functions)
+                    settings_changed = True
+                    break
+                elif ai_model_event == 'Reset Settings':
+                    if sg.popup_yes_no('Confirm Reset', 'Are you sure you want to reset AI Model settings to default?') == 'Yes':
+                        use_local_model = False
+                        local_model_url = ''
+                        supports_functions = True
+                        ai_model_win['-USE_LOCAL_MODEL-'].update(use_local_model)
+                        ai_model_win['-LOCAL_MODEL_URL-'].update(local_model_url)
+                        ai_model_win['-SUPPORT_FUNCTIONS_YES-'].update(True)
+                        ai_model_win['-SUPPORT_FUNCTIONS_NO-'].update(False)
+                        save_config(use_local_model=use_local_model, local_model_url=local_model_url, supports_functions=supports_functions)
+                        settings_changed = True
+                        break
+            ai_model_win.close()
+            if settings_changed:
+                if use_local_model:
+                    client = None
+                    window['-AI-MODEL-'].update('Local AI')
+                else:
+                    client = openai.OpenAI(api_key=api_key) if api_key else None
+                    window['-AI-MODEL-'].update('OpenAI')
+                configure_interpreter(use_local_model, api_key, local_model_url, supports_functions)
+                conversation_history = [{'role': 'system', 'content': 'You are a cybersecurity SOC analyst with more than 25 years of experience.'}]
+                window['-SHELL_OUTPUT-'].update('')
+                window['-SHELL_OUTPUT-'].Widget.delete('1.0', 'end')
+                window['-PROGRESS-'].update_bar(0)
+                window['-STATUS-'].update('- Ready -')
+                first_send_shell = True
+                sg.popup('AI Model settings updated and conversation history cleared.')
+                print(f"use_local_model: {use_local_model}")
+                print(f"local_model_url: {local_model_url}")
+                print(f"supports_functions: {supports_functions}")
+                print(f"client: {client}")
+
         elif event == 'Theme':
             theme_win = theme_window(theme)
             while True:
                 theme_event, theme_values = theme_win.read()
-                if theme_event in (sg.WINDOW_CLOSED, 'Exit'):
+                if theme_event in (sg.WINDOW_CLOSED, 'Exit', 'Cancel'):  # Handle Cancel button
                     break
                 elif theme_event == 'Save Theme':
                     theme = theme_values['-THEME-']
@@ -1016,8 +1156,14 @@ def main():
                     "- ABLE Framework: The tool integrates the ABLE framework, focusing on Actor, Behavior, Location, and Evidence to enhance hypothesis generation.\n\n"
                     "Credit: The PEAK framework was developed by Splunk. For more information, visit the Splunk blog:\n"
                     "https://www.splunk.com/en_us/blog/security/peak-hypothesis-driven-threat-hunting.html",
-                    image=logo_image_path
+                    image=about_image_path
     )
+        # Update AI model status only if the window is still open
+        if window and event not in (sg.WINDOW_CLOSED, 'Exit'):
+            if use_local_model:
+                window['-AI-MODEL-'].update('Local AI')
+            else:
+                window['-AI-MODEL-'].update('OpenAI')
 
     window.close()
 
