@@ -1,6 +1,6 @@
 # ThreatScout
 
-![About ThreatScout](About_logo.png)
+![About ThreatScout](Images/ThreatScout.png)
 
 ## Overview
 
