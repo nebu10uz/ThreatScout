@@ -35,6 +35,13 @@ ThreatScout utilizes OpenAI GPT or local AI models for intelligent analysis, aut
     ```bash
     pip install -r requirements.txt
 
+## Credits
+
+This project was inspired by the works of:
+- [Splunk](https://www.splunk.com/en_us/form/the-peak-threat-hunting-framework.html) - PEAK framework
+- [Clint Bodungen](https://www.oreilly.com/library/view/chatgpt-for-cybersecurity/9781805124047/) - Author of 'ChatGPT for Cybersecurity Cookbook'
+- [OpenAI](https://openai.com) - AI models
+
 ## Usage
 ```bash
     python main.py
