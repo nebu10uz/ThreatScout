@@ -17,14 +17,14 @@ import subprocess
 import os
 
 
-INTERPRETER = None
+# INTERPRETER = None
 
 def configure_interpreter(config):
-    global INTERPRETER
+    '''global INTERPRETER
     if config.use_local_model:
         INTERPRETER = LocalInterpreter(config.local_model_url, config.supports_functions)
     else:
-        INTERPRETER = OpenAIInterpreter(config.api_key)
+        INTERPRETER = OpenAIInterpreter(config.api_key)'''
 
     interpreter.model = "gpt-4o" if not config.use_local_model else "openai/x"
     interpreter.llm.api_key = config.api_key if not config.use_local_model else "not-needed"
@@ -43,7 +43,7 @@ def configure_interpreter(config):
     Prioritize threat hunting commands.
     """
 
-class OpenAIInterpreter:
+'''class OpenAIInterpreter:
     def __init__(self, api_key):
         self.client = openai.OpenAI(api_key=api_key)
 
@@ -57,9 +57,9 @@ class OpenAIInterpreter:
             return response
         
         except Exception as e:
-            return f"An error occurred: {str(e)}"
+            return f"An error occurred: {str(e)}"'''
 
-class LocalInterpreter:
+'''class LocalInterpreter:
     def __init__(self, local_model_url, supports_functions):
         self.local_model_url = local_model_url
         self.supports_functions = supports_functions
@@ -88,7 +88,7 @@ class LocalInterpreter:
             else:
                 return response.json()['choices'][0]['text'].strip()
         except Exception as e:
-            yield f"An error occurred: {str(e)}"
+            yield f"An error occurred: {str(e)}"'''
 
 def call_gpt(conversation_history, max_tokens=2048, config=None):
     try:
