@@ -1,9 +1,7 @@
-import openai
-from openai import OpenAI
 import requests
-import json
+from openai import OpenAI
 from utils import read_file, read_docx, read_pdf, open_file, save_report, is_executable
-from scapy.all import rdpcap, IP, TCP, UDP, Raw
+from scapy.all import rdpcap, IP, TCP, Raw
 from scapy.layers.http import HTTPRequest, HTTPResponse
 from scapy.layers.dns import DNS, DNSQR
 from scapy.layers.netbios import NBTSession
@@ -12,20 +10,10 @@ import hashlib
 import PySimpleGUI as sg
 from interpreter import interpreter
 from urllib.parse import unquote
-import platform
-import subprocess
 import os
 
 
-# INTERPRETER = None
-
 def configure_interpreter(config):
-    '''global INTERPRETER
-    if config.use_local_model:
-        INTERPRETER = LocalInterpreter(config.local_model_url, config.supports_functions)
-    else:
-        INTERPRETER = OpenAIInterpreter(config.api_key)'''
-
     interpreter.model = "gpt-4o" if not config.use_local_model else "openai/x"
     interpreter.llm.api_key = config.api_key if not config.use_local_model else "not-needed"
     interpreter.llm.api_base = None if not config.use_local_model else config.local_model_url + '/v1/'
@@ -42,53 +30,6 @@ def configure_interpreter(config):
     Increase verbosity for system logs.
     Prioritize threat hunting commands.
     """
-
-'''class OpenAIInterpreter:
-    def __init__(self, api_key):
-        self.client = openai.OpenAI(api_key=api_key)
-
-    def call_interpreter(self, conversation_history, max_tokens=2048, stream=False):
-        try:
-            if isinstance(conversation_history, str):
-                conversation_history = [{"role": "user", "content": conversation_history}]
-            
-            command = conversation_history[-1]['content']
-            response = interpreter.chat(command, stream=stream, display=False)
-            return response
-        
-        except Exception as e:
-            return f"An error occurred: {str(e)}"'''
-
-'''class LocalInterpreter:
-    def __init__(self, local_model_url, supports_functions):
-        self.local_model_url = local_model_url
-        self.supports_functions = supports_functions
-
-    def call_interpreter(self, conversation_history, max_tokens=2048, stream=False):
-        try:
-            headers = {"Content-Type": "application/json"}
-            data = {
-                "messages": conversation_history,
-                "max_tokens": max_tokens,
-                "temperature": 0.7,
-                "stop": None,
-                "n": 1,
-                "stream": stream
-            }
-            response = requests.post(self.local_model_url, headers=headers, data=json.dumps(data), stream=stream)
-            response.raise_for_status()
-            if stream:
-                for line in response.iter_lines():
-                    if line:
-                        chunk = json.loads(line.decode('utf-8'))
-                        if 'choices' in chunk and len(chunk['choices']) > 0:
-                            delta = chunk['choices'][0]['delta']
-                            if 'content' in delta:
-                                yield delta['content']
-            else:
-                return response.json()['choices'][0]['text'].strip()
-        except Exception as e:
-            yield f"An error occurred: {str(e)}"'''
 
 def call_gpt(conversation_history, max_tokens=2048, config=None):
     try:
@@ -124,7 +65,6 @@ def call_gpt(conversation_history, max_tokens=2048, config=None):
             else:
                 raise ValueError("Unexpected response structure: 'choices' key missing or empty.")
         else:
-            # Use OpenAI API
             client = OpenAI(api_key=config.api_key)
             response = client.chat.completions.create(
                 model="gpt-4o",
@@ -359,10 +299,6 @@ def analyze_pcap(window, values, config):
 
 def execute_command(window, values, command, config, local_only=False):
     try:
-        use_local_model = config.use_local_model
-        local_model_url = config.local_model_url
-        print(f"Using local model: {use_local_model}, Local model URL: {local_model_url}")  # Debug
-        
         full_response = []
         ai_only = values['-AI_ONLY-']
         first_chunk = True
@@ -371,60 +307,38 @@ def execute_command(window, values, command, config, local_only=False):
 
         print(f"Executing command: {command}")  # Debug
         
-        # Check if the command requires elevated privileges
-        requires_elevation = command.strip().lower().startswith(('sudo', 'runas', 'Password:'))
-        
-        if requires_elevation:
-            os_type = platform.system()
-            if os_type in ["Darwin", "Linux"]:
-                password = sg.popup_get_text(f"{os_type} sudo password required:", password_char='*')
-                if password:
-                    try:
-                        process = subprocess.Popen(['sudo', '-S'] + command.split()[1:], 
-                                                   stdin=subprocess.PIPE, 
-                                                   stdout=subprocess.PIPE, 
-                                                   stderr=subprocess.PIPE, 
-                                                   universal_newlines=True)
-                        stdout, stderr = process.communicate(password + '\n')
-                        full_response.append(stdout)
-                        if stderr:
-                            full_response.append(f"Error: {stderr}")
-                    except subprocess.CalledProcessError as e:
-                        full_response.append(f"Error executing command: {e}")
-                else:
-                    full_response.append("Password entry cancelled. Command execution aborted.")
-            elif os_type == "Windows":
-                try:
-                    import win32com.shell.shell as shell
-                    import win32con
-                    
-                    # Remove 'runas' from the command if present
-                    if command.lower().startswith('runas'):
-                        command = ' '.join(command.split()[1:])
-                    
-                    result = shell.ShellExecuteEx(lpVerb='runas', lpFile='cmd.exe', 
-                                                  lpParameters=f'/c {command}', 
-                                                  nShow=win32con.SW_HIDE)
-                    process_handle = result['hProcess']
-                    
-                    # Wait for the process to complete
-                    subprocess.Popen.wait(process_handle)
-                    
-                    full_response.append("Command executed with elevated privileges.")
-                except Exception as e:
-                    full_response.append(f"Error executing command with elevation: {e}")
+        try:
+            if config.use_local_model and local_only:
+                # For Local AI, only use the current command
+                for chunk in interpreter.chat(command, stream=True, display=False):
+                    if chunk["type"] in ["message", "console", "input"]:
+                        if "content" in chunk and chunk["content"] is not None:
+                            content = str(chunk["content"])
+                            if ai_only and chunk["type"] != "message":
+                                continue
+                            if first_chunk:
+                                content = content.lstrip('1').lstrip()
+                                first_chunk = False
+                            if previous_type and previous_type != chunk["type"]:
+                                full_response.append('\n\n')
+                            full_response.append(content)
+                            previous_type = chunk["type"]
             else:
-                full_response.append(f"Elevated privileges not supported on this OS: {os_type}")
-        else:
-            try:
-                if config.use_local_model and local_only:
-                    # For Local AI, only use the current command
-                    for chunk in interpreter.chat(command, stream=True, display=False):
-                        if chunk["type"] in ["message", "console", "input"]:
-                            if "content" in chunk and chunk["content"] is not None:
-                                content = str(chunk["content"])
-                                if ai_only and chunk["type"] != "message":
-                                    continue
+                # For OpenAI or when not using local_only, use the existing functionality
+                for chunk in interpreter.chat(command, stream=True, display=False):
+                    if chunk["type"] in ["message", "console", "input"]:
+                        if "content" in chunk and chunk["content"] is not None:
+                            content = str(chunk["content"])
+                            if "Password:" in content:
+                                password = sg.popup_get_text("Password required:", password_char='*')
+                                if password:
+                                    interpreter.chat(password, stream=False, display=False)
+                                else:
+                                    full_response.append("Password entry cancelled. Command execution aborted.")
+                                    break
+                            elif ai_only and chunk["type"] != "message":
+                                continue
+                            else:
                                 if first_chunk:
                                     content = content.lstrip('1').lstrip()
                                     first_chunk = False
@@ -432,45 +346,19 @@ def execute_command(window, values, command, config, local_only=False):
                                     full_response.append('\n\n')
                                 full_response.append(content)
                                 previous_type = chunk["type"]
-                else:
-                    # For OpenAI or when not using local_only, use the existing functionality
-                    for chunk in interpreter.chat(command, stream=True, display=False):
-                        if chunk["type"] in ["message", "console", "input"]:
-                            if "content" in chunk and chunk["content"] is not None:
-                                content = str(chunk["content"])
-                                if "Password:" in content:
-                                    password = sg.popup_get_text("Password required:", password_char='*')
-                                    if password:
-                                        interpreter.chat(password, stream=False, display=False)
-                                    else:
-                                        full_response.append("Password entry cancelled. Command execution aborted.")
-                                        break
-                                elif ai_only and chunk["type"] != "message":
-                                    continue
-                                else:
-                                    if first_chunk:
-                                        content = content.lstrip('1').lstrip()
-                                        first_chunk = False
-                                    if previous_type and previous_type != chunk["type"]:
-                                        full_response.append('\n\n')
-                                    full_response.append(content)
-                                    previous_type = chunk["type"]
-            except interpreter.exceptions.APIConnectionError as e:
-                error_message = f"Error connecting to the AI model: {str(e)}"
-                full_response.append(error_message)
-                full_response.append("Please ensure the AI model (local or remote) is running and accessible.")
-                print(error_message)  # Debug
-            except Exception as e:
-                error_message = f"An unexpected error occurred: {str(e)}"
-                full_response.append(error_message)
-                print(error_message)  # Debug
+        except interpreter.exceptions.APIConnectionError as e:
+            error_message = f"Error connecting to the AI model: {str(e)}"
+            full_response.append(error_message)
+            full_response.append("Please ensure the AI model (local or remote) is running and accessible.")
+        except Exception as e:
+            error_message = f"An unexpected error occurred: {str(e)}"
+            full_response.append(error_message)
 
         return ''.join(str(item) for item in full_response).strip()
 
     except Exception as e:
         error_message = f"Error executing command: {str(e)}"
-        window['-STATUS-'].update(error_message)  # Update status with error message
-        print(error_message)  # Debug
+        window['-STATUS-'].update(error_message)
         return error_message
 
 def analyze_pcap_file(window, pcap_path, alerts_path=None, config=None):
