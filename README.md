@@ -47,4 +47,5 @@ This project was inspired by the works of:
     python main.py
 ```
 
-### ToDo
+## ThreatScout GUI
+![SCR-20240928-odvg](https://github.com/user-attachments/assets/a5525ca5-3dc0-4a85-ba2f-7e331a4f0ac2)
