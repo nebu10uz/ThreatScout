@@ -21,7 +21,7 @@ ThreatScout is a comprehensive cybersecurity tool designed to assist threat hunt
 
 ## AI Integration
 
-ThreatScout utilizes OpenAI GPT or local AI models for intelligent analysis, automation, and assistance across all cybersecurity tasks.
+ThreatScout utilizes OpenAI GPT or local AI models for intelligent analysis, automation, and assistance in initial threat hunting tasks.
 
 ## Installation
 
